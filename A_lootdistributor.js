@@ -409,7 +409,7 @@ registerPlugin({
                 delete sessions[uid].last;
                 saveSessions(sessions);
                 saveStashes(stashes);
-                reply(client, 'Removed ' + lastAmount + 'x "' + lastName + '" from the stash. Enter the next item or "cancel" to finish.');
+                reply(client, 'Removed ' + lastAmount + 'x "' + lastName + '" from the stash. Enter the next item, "undo" to undo submission or "cancel" to finish stashing items.');
             } else {
                 reply(client, 'Could not undo that entry.');
             }
@@ -424,7 +424,7 @@ registerPlugin({
         sessions[uid].last = { key: key, amount: parsed.amount, name: parsed.name };
         saveSessions(sessions);
         saveStashes(stashes);
-        reply(client, parsed.amount + 'x "' + parsed.name + '" added to loot stash. Enter the next item or "cancel" to finish.');
+        reply(client, parsed.amount + 'x "' + parsed.name + '" added to loot stash. Enter the next item, "undo" to undo submission or "cancel" to finish stashing items.');
     }
 
     // ---- Distribution ----
