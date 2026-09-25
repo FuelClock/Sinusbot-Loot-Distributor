@@ -417,7 +417,7 @@ registerPlugin({
                 delete sessions[uid].last;
                 saveSessions(sessions);
                 saveStashes(stashes);
-                reply(client, 'Removed ' + lastAmount + 'x "' + lastName + '" from the stash. Enter the next item, "undo" to undo submission or "cancel" to finish stashing items.');
+                reply(client, 'Removed ' + lastAmount + 'x "' + lastName + '" from the stash. Enter the next item, "undo" to undo submission or "done" to finish stashing items.');
             } else {
                 reply(client, 'Could not undo that entry.');
             }
@@ -425,7 +425,7 @@ registerPlugin({
         }
         var parsed = parseItemLine(text);
         if (!parsed) {
-            reply(client, 'Could not read that. Use "<item name> <amount>" or "<amount> <item name>", or "cancel" to finish.');
+            reply(client, 'Could not read that. Use "<item name> <amount>" or "<amount> <item name>", or "done" to finish.');
             return;
         }
         var key = addItem(stash, uid, uname, parsed.name, parsed.amount);
@@ -436,7 +436,7 @@ registerPlugin({
         sessions[uid].last = { key: key, amount: parsed.amount, name: parsed.name };
         saveSessions(sessions);
         saveStashes(stashes);
-        reply(client, parsed.amount + 'x "' + parsed.name + '" added to loot stash. Enter the next item, "undo" to undo submission or "cancel" to finish stashing items.');
+        reply(client, parsed.amount + 'x "' + parsed.name + '" added to loot stash. Enter the next item, "undo" to undo submission or "done" to finish stashing items.');
     }
 
     // ---- Distribution ----
@@ -660,7 +660,7 @@ registerPlugin({
             cmdJoin(client, parts.slice(1).join(' ').trim());
         } else if (sub === 'list') {
             cmdList(client);
-        } else if (sub === 'delete') {
+        } else if (sub === 'delete' || sub === 'remove') {
             cmdDelete(client, parts.slice(1).join(' ').trim(), false);
         } else if (sub === 'clear') {
             if (!isAdmin(client)) {
