@@ -379,9 +379,9 @@ registerPlugin({
             return;
         }
         var sessions = loadSessions();
-        sessions[uid] = { type: 'deposit', stash: stash.name.toLowerCase() };
+        sessions[uid] = { type: 'deposit', stash: stash.name.toLowerCase(), items: [] };
         saveSessions(sessions);
-        reply(client, 'Which loot are you depositing into "' + stash.name + '"?\nEnter items as "<item name> <amount>" or "<amount> <item name>".\nType "undo" to remove your last item, "cancel" or "done" to finish.');
+        reply(client, 'Which loot are you depositing into "' + stash.name + '"?\nEnter items as "<item name> <amount>" or "<amount> <item name>".\nType "undo" to remove your last item, "cancel" to abort stashing, or "done" to finish.');
     }
 
     function handleDepositInput(client, text) {
@@ -398,7 +398,40 @@ registerPlugin({
             return;
         }
         var lower = text.toLowerCase().trim();
-        if (lower === 'cancel' || lower === 'done') {
+        if (sess.confirmCancel) {
+            if (lower === 'yes') {
+                var undone = 0;
+                if (sess.items && sess.items.length) {
+                    for (var i = sess.items.length - 1; i >= 0; i--) {
+                        if (removeItem(stash, uid, sess.items[i].key, sess.items[i].amount)) undone++;
+                    }
+                }
+                delete sessions[uid];
+                saveSessions(sessions);
+                saveStashes(stashes);
+                reply(client, 'Cancelled stashing. Removed ' + undone + ' item' + (undone === 1 ? '' : 's') + ' from this session.\n' + stashSummary(stash));
+            } else if (lower === 'no') {
+                delete sessions[uid].confirmCancel;
+                saveSessions(sessions);
+                reply(client, 'Continuing. Enter the next item, "undo" to undo submission or "done" to finish stashing items.');
+            } else {
+                reply(client, 'Are you sure you want to cancel stashing? This will remove all items that haven\'t had their submission confirmed yet with "done". Reply yes or no.');
+            }
+            return;
+        }
+        if (lower === 'cancel') {
+            if (!sess.items || !sess.items.length) {
+                delete sessions[uid];
+                saveSessions(sessions);
+                reply(client, 'Deposit session cancelled. Nothing was deposited.');
+                return;
+            }
+            sess.confirmCancel = true;
+            saveSessions(sessions);
+            reply(client, 'Are you sure you want to cancel stashing? This will remove all items that haven\'t had their submission confirmed yet with "done". Reply yes or no.');
+            return;
+        }
+        if (lower === 'done') {
             delete sessions[uid];
             saveSessions(sessions);
             saveStashes(stashes);
@@ -406,18 +439,17 @@ registerPlugin({
             return;
         }
         if (lower === 'undo') {
-            if (!sess.last || !sess.last.key) {
+            if (!sess.items || !sess.items.length) {
                 reply(client, 'Nothing to undo in this session.');
                 return;
             }
-            var lastKey = sess.last.key;
-            var lastAmount = sess.last.amount;
-            var lastName = sess.last.name;
-            if (removeItem(stash, uid, lastKey, lastAmount)) {
-                delete sessions[uid].last;
+            var last = sess.items[sess.items.length - 1];
+            if (removeItem(stash, uid, last.key, last.amount)) {
+                sess.items.pop();
+                if (!sess.items.length) delete sessions[uid].items;
                 saveSessions(sessions);
                 saveStashes(stashes);
-                reply(client, 'Removed ' + lastAmount + 'x "' + lastName + '" from the stash. Enter the next item, "undo" to undo submission or "done" to finish stashing items.');
+                reply(client, 'Removed ' + last.amount + 'x "' + last.name + '" from the stash. Enter the next item, "undo" to undo submission or "done" to finish stashing items.');
             } else {
                 reply(client, 'Could not undo that entry.');
             }
@@ -434,6 +466,8 @@ registerPlugin({
             return;
         }
         sessions[uid].last = { key: key, amount: parsed.amount, name: parsed.name };
+        if (!sessions[uid].items) sessions[uid].items = [];
+        sessions[uid].items.push(sessions[uid].last);
         saveSessions(sessions);
         saveStashes(stashes);
         reply(client, parsed.amount + 'x "' + parsed.name + '" added to loot stash. Enter the next item, "undo" to undo submission or "done" to finish stashing items.');
