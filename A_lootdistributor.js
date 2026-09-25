@@ -211,6 +211,14 @@ registerPlugin({
     }
 
     function addItem(stash, uid, uname, itemName, amount) {
+        // duplicate depositor names are not allowed in a stash
+        var l = String(uname).toLowerCase();
+        for (var du in stash.deposits) {
+            if (!stash.deposits.hasOwnProperty(du)) continue;
+            if (du !== uid && String(stash.deposits[du].name).toLowerCase() === l) {
+                return null;
+            }
+        }
         var key = itemName.toLowerCase();
         if (!stash.items[key]) stash.items[key] = { name: itemName, amount: 0 };
         stash.items[key].name = itemName; // keep newest casing
@@ -421,6 +429,10 @@ registerPlugin({
             return;
         }
         var key = addItem(stash, uid, uname, parsed.name, parsed.amount);
+        if (!key) {
+            reply(client, 'Another account with the nickname "' + uname + '" already deposited in this stash. Duplicate names are not allowed.');
+            return;
+        }
         sessions[uid].last = { key: key, amount: parsed.amount, name: parsed.name };
         saveSessions(sessions);
         saveStashes(stashes);
@@ -446,48 +458,23 @@ registerPlugin({
             return;
         }
         var sessions = loadSessions();
-        var participants = {};
-        var selfKey = addParticipant(participants, clientName(client));
+        // Pre-fill participants with all stash depositors (in deposit order)
+        var participants = [];
+        for (var du in stash.deposits) {
+            if (stash.deposits.hasOwnProperty(du)) participants.push(stash.deposits[du].name);
+        }
         sessions[uid] = { type: 'distribute', stash: stash.name.toLowerCase(), participants: participants };
         saveSessions(sessions);
-        reply(client, 'Distributing "' + stash.name + '". You are participant #1.\nType a participant name to add them, or "done" to calculate.');
+        reply(client, 'Distributing "' + stash.name + '".\nParticipants (depositors): ' + participants.join(', ') + '\nType another participant name to add them (exact name as submitted), or "done" to calculate.');
     }
 
-    // Participants: online people keyed by uid, offline/ingame names keyed by 'name:<lower>'.
-    // If several online accounts share the name, all of them are added as
-    // separate participants (each keeps its own deposit record).
-    // Returns the first key added, or null if that name is already fully present.
-    function addParticipant(participants, tname) {
-        var lower = tname.toLowerCase();
-        var candidates = [];
-        var clients = (typeof backend.getClients === 'function') ? backend.getClients() : backend.clients;
-        if (clients) {
-            for (var i = 0; i < clients.length; i++) {
-                if (String(clients[i].name()).toLowerCase() === lower) candidates.push(clients[i]);
-            }
+    // Add a participant exactly as submitted; duplicates (case-insensitive) are rejected.
+    function participantExists(participants, tname) {
+        var lower = String(tname).toLowerCase();
+        for (var i = 0; i < participants.length; i++) {
+            if (String(participants[i]).toLowerCase() === lower) return true;
         }
-        var usedKeys = {}, lowerNames = {};
-        for (var k in participants) {
-            if (!participants.hasOwnProperty(k)) continue;
-            usedKeys[k] = true;
-            lowerNames[String(participants[k].name).toLowerCase()] = true;
-        }
-        var addedKey = null;
-        if (candidates.length > 0) {
-            for (var c = 0; c < candidates.length; c++) {
-                var cuid = clientUid(candidates[c]);
-                if (usedKeys[cuid] || lowerNames[lower]) continue;
-                participants[cuid] = { name: tname, uid: cuid };
-                if (!addedKey) addedKey = cuid;
-            }
-        } else {
-            var key = 'name:' + lower;
-            if (!usedKeys[key] && !lowerNames[lower]) {
-                participants[key] = { name: tname };
-                addedKey = key;
-            }
-        }
-        return addedKey;
+        return false;
     }
 
     function handleDistributeInput(client, text) {
@@ -512,57 +499,52 @@ registerPlugin({
             return;
         }
         var tname = text.trim();
-        var added = addParticipant(sess.participants, tname);
-        if (!added) {
+        if (participantExists(sess.participants, tname)) {
             reply(client, tname + ' is already a participant. Add another or "done" to calculate.');
             return;
         }
+        sess.participants.push(tname);
         saveSessions(sessions);
-        var count = 0, k;
-        for (k in sess.participants) if (sess.participants.hasOwnProperty(k)) count++;
-        reply(client, 'Added ' + tname + ' (' + count + ' participants). Add another name, or "done" to calculate.');
+        reply(client, 'Added ' + tname + ' (' + sess.participants.length + ' participants). Add another name, or "done" to calculate.');
     }
 
     // Even distribution: floor(N/X) each, remainder to depositors first.
-    // Online participants are matched to deposits by uid; offline ones by name
-    // (summing every deposit entry with that name).
+    // Participants are the exact strings submitted (depositors pre-filled).
+    // Depositors keep their own deposited items; trades only happen between
+    // different participants.
     function calculateDistribution(stash, participants) {
-        var pkeys = [], k;
-        for (k in participants) if (participants.hasOwnProperty(k)) pkeys.push(k);
-        var X = pkeys.length;
+        var X = participants.length;
         if (X === 0) return 'No participants. Distribution cancelled.';
 
-        function nameOf(pkey) { return participants[pkey].name; }
-        function uidOf(pkey) { return participants[pkey].uid || null; }
+        function lower(s) { return String(s).toLowerCase(); }
 
-        // deposited amount of an item for a participant
-        function depositedOf(pkey, itemKey) {
-            var uid = uidOf(pkey);
-            if (uid && stash.deposits[uid]) return stash.deposits[uid].items[itemKey] || 0;
-            var lower = nameOf(pkey).toLowerCase();
+        // deposited amount of an item for a participant name
+        function depositedOf(name, itemKey) {
+            var l = lower(name);
             var total = 0;
-            for (var du2 in stash.deposits) {
-                if (!stash.deposits.hasOwnProperty(du2)) continue;
-                if (String(stash.deposits[du2].name).toLowerCase() === lower) {
-                    total += stash.deposits[du2].items[itemKey] || 0;
+            for (var du in stash.deposits) {
+                if (!stash.deposits.hasOwnProperty(du)) continue;
+                if (lower(stash.deposits[du].name) === l) {
+                    total += stash.deposits[du].items[itemKey] || 0;
                 }
             }
             return total;
         }
 
-        // participant keys that deposited anything at all (for remainder preference)
-        var depositorKeys = {};
-        for (var pi = 0; pi < pkeys.length; pi++) {
+        // participant names that deposited anything at all (for remainder preference)
+        var isDepositor = {};
+        for (var pi = 0; pi < participants.length; pi++) {
             for (var ik in stash.items) {
-                if (stash.items.hasOwnProperty(ik) && depositedOf(pkeys[pi], ik) > 0) {
-                    depositorKeys[pkeys[pi]] = true;
+                if (stash.items.hasOwnProperty(ik) && depositedOf(participants[pi], ik) > 0) {
+                    isDepositor[lower(participants[pi])] = true;
                     break;
                 }
             }
         }
 
         var lines = ['=== Distribution of "' + stash.name + '" ==='];
-        var gives = {}; // pkey -> [{ to: name, item: name, amount: n }]
+        var gives = {}; // depositorNameLower -> [{ to: name, item: name, amount: n }]
+        var keeps = []; // "X keeps their own Nx <item>"
         var anyItem = false;
 
         for (var itemKey in stash.items) {
@@ -573,57 +555,64 @@ registerPlugin({
             var base = Math.floor(N / X);
             var rem = N % X;
 
-            // Depositors first, then non-depositors; remainder goes to depositors first
+            // Depositors first (deposit order), then others (input order)
             var order = [];
-            for (var i = 0; i < pkeys.length; i++) {
-                if (depositorKeys[pkeys[i]]) order.push(pkeys[i]);
+            for (var du0 in stash.deposits) {
+                if (!stash.deposits.hasOwnProperty(du0)) continue;
+                var dName = stash.deposits[du0].name;
+                if (participantExists(participants, dName) && isDepositor[lower(dName)]) order.push(dName);
             }
-            for (var j = 0; j < pkeys.length; j++) {
-                if (!depositorKeys[pkeys[j]]) order.push(pkeys[j]);
+            for (var j = 0; j < participants.length; j++) {
+                if (!isDepositor[lower(participants[j])]) order.push(participants[j]);
             }
 
-            var share = {}; // pkey -> amount received of this item
+            var share = {}; // lower name -> amount received of this item
             for (var p = 0; p < order.length; p++) {
                 var extra = (p < rem) ? 1 : 0;
-                share[order[p]] = base + extra;
+                share[lower(order[p])] = base + extra;
             }
 
             lines.push('-- ' + item.name + ' (' + N + ' total, ' + X + ' participants) --');
             for (var r = 0; r < order.length; r++) {
-                var pk = order[r];
-                lines.push(nameOf(pk) + ' receives ' + share[pk] + 'x ' + item.name);
+                var nm = order[r];
+                lines.push(nm + ' receives ' + share[lower(nm)] + 'x ' + item.name);
             }
 
-            // trade instructions: depositor gave G, receives R
-            for (var dk in depositorKeys) {
-                if (!depositorKeys.hasOwnProperty(dk)) continue;
-                var gave = depositedOf(dk, itemKey);
-                var gets = share[dk] || 0;
+            // trade instructions per depositor
+            for (var du1 in stash.deposits) {
+                if (!stash.deposits.hasOwnProperty(du1)) continue;
+                var dName1 = stash.deposits[du1].name;
+                var dKey = lower(dName1);
+                if (!participantExists(participants, dName1)) continue; // depositor not participating
+                var gave = stash.deposits[du1].items[itemKey] || 0;
+                var gets = share[dKey] || 0;
                 if (gave > gets) {
                     var owed = gave - gets;
-                    // give surplus to participants who receive more than they deposited
+                    // give surplus to OTHER participants who need more than they deposited
                     for (var t = 0; t < order.length && owed > 0; t++) {
                         var rec = order[t];
-                        if (rec === dk) continue;
-                        var recNeed = (share[rec] || 0) - depositedOf(rec, itemKey);
+                        if (lower(rec) === dKey) continue; // never trade to yourself - keep instead
+                        var recNeed = (share[lower(rec)] || 0) - depositedOf(rec, itemKey);
                         if (recNeed > 0) {
                             var give = Math.min(owed, recNeed);
-                            if (!gives[dk]) gives[dk] = [];
-                            gives[dk].push({ to: nameOf(rec), item: item.name, amount: give });
+                            if (!gives[dKey]) gives[dKey] = [];
+                            gives[dKey].push({ from: dName1, to: rec, item: item.name, amount: give });
                             owed -= give;
                         }
                     }
                     // leftover surplus: give to first other participants in order
                     for (var t2 = 0; t2 < order.length && owed > 0; t2++) {
                         var rec2 = order[t2];
-                        if (rec2 === dk) continue;
-                        var give2 = Math.min(owed, share[rec2] || 0);
+                        if (lower(rec2) === dKey) continue;
+                        var give2 = Math.min(owed, share[lower(rec2)] || 0);
                         if (give2 > 0) {
-                            if (!gives[dk]) gives[dk] = [];
-                            gives[dk].push({ to: nameOf(rec2), item: item.name, amount: give2 });
+                            if (!gives[dKey]) gives[dKey] = [];
+                            gives[dKey].push({ from: dName1, to: rec2, item: item.name, amount: give2 });
                             owed -= give2;
                         }
                     }
+                } else if (gave > 0) {
+                    keeps.push(dName1 + ' keeps their ' + gave + 'x ' + item.name + ' (share: ' + gets + 'x)');
                 }
             }
         }
@@ -633,16 +622,19 @@ registerPlugin({
         var tradeLines = [];
         for (var gk in gives) {
             if (!gives.hasOwnProperty(gk)) continue;
-            var name = nameOf(gk);
             for (var g = 0; g < gives[gk].length; g++) {
-                tradeLines.push(name + ' trades ' + gives[gk][g].amount + 'x ' + gives[gk][g].item + ' to ' + gives[gk][g].to);
+                tradeLines.push(gives[gk][g].from + ' trades ' + gives[gk][g].amount + 'x ' + gives[gk][g].item + ' to ' + gives[gk][g].to);
             }
         }
         if (tradeLines.length > 0) {
             lines.push('--- Trades required ---');
             lines = lines.concat(tradeLines);
         } else {
-            lines.push('No trades required - everyone already has their share in the stash.');
+            lines.push('No trades required.');
+        }
+        if (keeps.length > 0) {
+            lines.push('--- Keep ---');
+            lines = lines.concat(keeps);
         }
         return lines.join('\n');
     }
