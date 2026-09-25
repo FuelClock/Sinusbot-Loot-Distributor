@@ -136,7 +136,7 @@ registerPlugin({
     }
 
     function findOnlineClient(name) {
-        var clients = backend.getClients();
+        var clients = (typeof backend.getClients === 'function') ? backend.getClients() : backend.clients;
         if (!clients) return null;
         var lower = String(name).toLowerCase();
         for (var i = 0; i < clients.length; i++) {
@@ -447,10 +447,47 @@ registerPlugin({
         }
         var sessions = loadSessions();
         var participants = {};
-        participants[clientName(client).toLowerCase()] = clientName(client);
+        var selfKey = addParticipant(participants, clientName(client));
         sessions[uid] = { type: 'distribute', stash: stash.name.toLowerCase(), participants: participants };
         saveSessions(sessions);
         reply(client, 'Distributing "' + stash.name + '". You are participant #1.\nType a participant name to add them, or "done" to calculate.');
+    }
+
+    // Participants: online people keyed by uid, offline/ingame names keyed by 'name:<lower>'.
+    // If several online accounts share the name, all of them are added as
+    // separate participants (each keeps its own deposit record).
+    // Returns the first key added, or null if that name is already fully present.
+    function addParticipant(participants, tname) {
+        var lower = tname.toLowerCase();
+        var candidates = [];
+        var clients = (typeof backend.getClients === 'function') ? backend.getClients() : backend.clients;
+        if (clients) {
+            for (var i = 0; i < clients.length; i++) {
+                if (String(clients[i].name()).toLowerCase() === lower) candidates.push(clients[i]);
+            }
+        }
+        var usedKeys = {}, lowerNames = {};
+        for (var k in participants) {
+            if (!participants.hasOwnProperty(k)) continue;
+            usedKeys[k] = true;
+            lowerNames[String(participants[k].name).toLowerCase()] = true;
+        }
+        var addedKey = null;
+        if (candidates.length > 0) {
+            for (var c = 0; c < candidates.length; c++) {
+                var cuid = clientUid(candidates[c]);
+                if (usedKeys[cuid] || lowerNames[lower]) continue;
+                participants[cuid] = { name: tname, uid: cuid };
+                if (!addedKey) addedKey = cuid;
+            }
+        } else {
+            var key = 'name:' + lower;
+            if (!usedKeys[key] && !lowerNames[lower]) {
+                participants[key] = { name: tname };
+                addedKey = key;
+            }
+        }
+        return addedKey;
     }
 
     function handleDistributeInput(client, text) {
@@ -475,12 +512,11 @@ registerPlugin({
             return;
         }
         var tname = text.trim();
-        var tkey = tname.toLowerCase();
-        if (sess.participants[tkey]) {
+        var added = addParticipant(sess.participants, tname);
+        if (!added) {
             reply(client, tname + ' is already a participant. Add another or "done" to calculate.');
             return;
         }
-        sess.participants[tkey] = tname;
         saveSessions(sessions);
         var count = 0, k;
         for (k in sess.participants) if (sess.participants.hasOwnProperty(k)) count++;
@@ -488,29 +524,41 @@ registerPlugin({
     }
 
     // Even distribution: floor(N/X) each, remainder to depositors first.
-    // Participants are keyed by lowercase name (offline/ingame players allowed).
+    // Online participants are matched to deposits by uid; offline ones by name
+    // (summing every deposit entry with that name).
     function calculateDistribution(stash, participants) {
         var pkeys = [], k;
         for (k in participants) if (participants.hasOwnProperty(k)) pkeys.push(k);
         var X = pkeys.length;
         if (X === 0) return 'No participants. Distribution cancelled.';
 
-        // map depositor UIDs to their lowercase name for preference ordering
-        var depositorKeys = {}; // participantKey -> true if that participant deposited
-        for (var du in stash.deposits) {
-            if (!stash.deposits.hasOwnProperty(du)) continue;
-            var dkey = String(stash.deposits[du].name).toLowerCase();
-            if (participants[dkey]) depositorKeys[dkey] = true;
-        }
-        // deposited amount of an item for a participant (by name), 0 if none
+        function nameOf(pkey) { return participants[pkey].name; }
+        function uidOf(pkey) { return participants[pkey].uid || null; }
+
+        // deposited amount of an item for a participant
         function depositedOf(pkey, itemKey) {
+            var uid = uidOf(pkey);
+            if (uid && stash.deposits[uid]) return stash.deposits[uid].items[itemKey] || 0;
+            var lower = nameOf(pkey).toLowerCase();
+            var total = 0;
             for (var du2 in stash.deposits) {
                 if (!stash.deposits.hasOwnProperty(du2)) continue;
-                if (String(stash.deposits[du2].name).toLowerCase() === pkey) {
-                    return stash.deposits[du2].items[itemKey] || 0;
+                if (String(stash.deposits[du2].name).toLowerCase() === lower) {
+                    total += stash.deposits[du2].items[itemKey] || 0;
                 }
             }
-            return 0;
+            return total;
+        }
+
+        // participant keys that deposited anything at all (for remainder preference)
+        var depositorKeys = {};
+        for (var pi = 0; pi < pkeys.length; pi++) {
+            for (var ik in stash.items) {
+                if (stash.items.hasOwnProperty(ik) && depositedOf(pkeys[pi], ik) > 0) {
+                    depositorKeys[pkeys[pi]] = true;
+                    break;
+                }
+            }
         }
 
         var lines = ['=== Distribution of "' + stash.name + '" ==='];
@@ -543,7 +591,7 @@ registerPlugin({
             lines.push('-- ' + item.name + ' (' + N + ' total, ' + X + ' participants) --');
             for (var r = 0; r < order.length; r++) {
                 var pk = order[r];
-                lines.push(participants[pk] + ' receives ' + share[pk] + 'x ' + item.name);
+                lines.push(nameOf(pk) + ' receives ' + share[pk] + 'x ' + item.name);
             }
 
             // trade instructions: depositor gave G, receives R
@@ -561,7 +609,7 @@ registerPlugin({
                         if (recNeed > 0) {
                             var give = Math.min(owed, recNeed);
                             if (!gives[dk]) gives[dk] = [];
-                            gives[dk].push({ to: participants[rec], item: item.name, amount: give });
+                            gives[dk].push({ to: nameOf(rec), item: item.name, amount: give });
                             owed -= give;
                         }
                     }
@@ -572,7 +620,7 @@ registerPlugin({
                         var give2 = Math.min(owed, share[rec2] || 0);
                         if (give2 > 0) {
                             if (!gives[dk]) gives[dk] = [];
-                            gives[dk].push({ to: participants[rec2], item: item.name, amount: give2 });
+                            gives[dk].push({ to: nameOf(rec2), item: item.name, amount: give2 });
                             owed -= give2;
                         }
                     }
@@ -585,7 +633,7 @@ registerPlugin({
         var tradeLines = [];
         for (var gk in gives) {
             if (!gives.hasOwnProperty(gk)) continue;
-            var name = participants[gk] || gk;
+            var name = nameOf(gk);
             for (var g = 0; g < gives[gk].length; g++) {
                 tradeLines.push(name + ' trades ' + gives[gk][g].amount + 'x ' + gives[gk][g].item + ' to ' + gives[gk][g].to);
             }
