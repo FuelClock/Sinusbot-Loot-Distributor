@@ -113,7 +113,7 @@ registerPlugin({
                 return lib.clientServerGroupsIsMemberOfOne(client, lib.serverGroupParseGroups(ids));
             } catch (e) { /* fall through to manual check */ }
         }
-        groups = client.serverGroups();
+        groups = client.getServerGroups();
         if (!groups) return false;
         for (var j = 0; j < groups.length; j++) {
             var gid = String(groups[j].id());
