@@ -17,7 +17,9 @@
  * Deposit session:
  *   After `!stash` the bot asks which loot you are depositing. Reply with
  *   `<item name> <amount>` or `<amount> <item name>`. Keep entering items,
- *   `undo` removes your latest submission, `cancel` / `done` ends the session.
+ *   `undo` removes your latest submission, `cancel` (with confirmation)
+ *   or `done` ends the session. After `done` a 60-second grace period
+ *   allows `undo` / `cancel` before the deposit becomes final.
  *
  * Distribution:
  *   `!stash distribute` asks you to add participants one by one (by name),
@@ -93,6 +95,24 @@ registerPlugin({
 
     function saveSessions(sessions) {
         store.set('sessions', sessions);
+    }
+
+    // Post-"done" grace period: one final chance to undo/cancel the deposit.
+    var GRACE_MS = 60 * 1000;
+
+    function loadGrace() {
+        var g = store.get('grace');
+        if (!g) g = {};
+        return g;
+    }
+
+    function saveGrace(grace) {
+        store.set('grace', grace);
+    }
+
+    function clearGrace(grace, uid) {
+        delete grace[uid];
+        saveGrace(grace);
     }
 
     // ---- Helpers ----
@@ -278,7 +298,7 @@ registerPlugin({
             '!stash delete <name> - delete your own stash',
             '!stash clear <name> - admin: delete any stash',
             '!stash distribute - distribute a stash evenly (depositors)',
-            '!stash undo / cancel - while in a session'
+            '!stash undo / cancel - while in a session, or within 60s after "done"',
         ].join('\n'));
     }
 
@@ -432,10 +452,20 @@ registerPlugin({
             return;
         }
         if (lower === 'done') {
-            delete sessions[uid];
-            saveSessions(sessions);
-            saveStashes(stashes);
-            reply(client, 'Deposit session ended.\n' + stashSummary(stash));
+            var grace = loadGrace();
+            if (sess.items && sess.items.length) {
+                grace[uid] = { stash: sess.stash, items: sess.items, until: now() + GRACE_MS };
+                saveGrace(grace);
+                delete sessions[uid];
+                saveSessions(sessions);
+                saveStashes(stashes);
+                reply(client, 'Deposit confirmed. You have 60 seconds to type "undo" to remove your last item or "cancel" to remove all items from this session - after that the deposit is final.\n' + stashSummary(stash));
+            } else {
+                delete sessions[uid];
+                saveSessions(sessions);
+                saveStashes(stashes);
+                reply(client, 'Deposit session ended.\n' + stashSummary(stash));
+            }
             return;
         }
         if (lower === 'undo') {
@@ -471,6 +501,78 @@ registerPlugin({
         saveSessions(sessions);
         saveStashes(stashes);
         reply(client, parsed.amount + 'x "' + parsed.name + '" added to loot stash. Enter the next item, "undo" to undo submission or "done" to finish stashing items.');
+    }
+
+    // ---- Post-"done" grace period ----
+    // 60s window after "done" during which "undo"/"cancel" still work.
+    // Starting a new stashing session is NOT blocked: an active session
+    // always takes priority and the grace record simply expires on its own.
+    function handleGrace(client, text) {
+        var uid = clientUid(client);
+        var grace = loadGrace();
+        var g = grace[uid];
+        if (!g) return false;
+        var stashes = loadStashes();
+        var stash = stashes[g.stash];
+        var lower = String(text).toLowerCase().trim();
+        if (!stash || now() >= g.until) {
+            clearGrace(grace, uid);
+            if (stash && lower !== 'undo' && lower !== 'cancel') return false;
+            reply(client, 'The grace period is over. Your deposit is final.');
+            return true;
+        }
+        if (g.confirmCancel) {
+            if (lower === 'yes') {
+                var removed = 0;
+                for (var i = g.items.length - 1; i >= 0; i--) {
+                    if (removeItem(stash, uid, g.items[i].key, g.items[i].amount)) removed++;
+                }
+                clearGrace(grace, uid);
+                saveStashes(stashes);
+                reply(client, 'Cancelled stashing. Removed ' + removed + ' item' + (removed === 1 ? '' : 's') + ' from this session.\n' + stashSummary(stash));
+            } else if (lower === 'no') {
+                delete g.confirmCancel;
+                saveGrace(grace);
+                reply(client, 'Continuing. Type "undo" to remove your last item or "cancel" to remove all items from this session.');
+            } else {
+                reply(client, 'Are you sure you want to cancel stashing? This will remove all items that haven\'t had their submission confirmed yet with "done". Reply yes or no.');
+            }
+            return true;
+        }
+        if (lower === 'cancel') {
+            if (g.items && g.items.length) {
+                g.confirmCancel = true;
+                saveGrace(grace);
+                reply(client, 'Are you sure you want to cancel stashing? This will remove all items that haven\'t had their submission confirmed yet with "done". Reply yes or no.');
+            } else {
+                clearGrace(grace, uid);
+                reply(client, 'Nothing to remove. Your deposit is final.');
+            }
+            return true;
+        }
+        if (lower === 'undo') {
+            if (!g.items || !g.items.length) {
+                clearGrace(grace, uid);
+                reply(client, 'Nothing to undo. Your deposit is final.');
+                return true;
+            }
+            var last = g.items[g.items.length - 1];
+            if (removeItem(stash, uid, last.key, last.amount)) {
+                g.items.pop();
+                if (!g.items.length) {
+                    clearGrace(grace, uid);
+                    reply(client, 'Removed ' + last.amount + 'x "' + last.name + '" from the stash. That was all - your deposit is final.\n' + stashSummary(stash));
+                } else {
+                    saveGrace(grace);
+                    reply(client, 'Removed ' + last.amount + 'x "' + last.name + '" from the stash. Type "undo" to remove another item or "cancel" to remove all.');
+                }
+            } else {
+                reply(client, 'Could not undo that entry.');
+            }
+            saveStashes(stashes);
+            return true;
+        }
+        return false;
     }
 
     // ---- Distribution ----
@@ -708,6 +810,8 @@ registerPlugin({
             var sessions = loadSessions();
             var uid = clientUid(client);
             if (!sessions[uid]) {
+                // fall back to the post-"done" grace period
+                if (handleGrace(client, sub)) return;
                 reply(client, 'You have no active session.');
                 return;
             }
@@ -740,11 +844,24 @@ registerPlugin({
         // Active sessions swallow plain chat
         var sessions = loadSessions();
         var sess = sessions[uid];
-        if (!sess) return;
-        if (sess.type === 'deposit') {
-            handleDepositInput(client, trimmed);
-        } else if (sess.type === 'distribute') {
-            handleDistributeInput(client, trimmed);
+        if (sess) {
+            if (sess.type === 'deposit') {
+                handleDepositInput(client, trimmed);
+            } else if (sess.type === 'distribute') {
+                handleDistributeInput(client, trimmed);
+            }
+            return;
+        }
+
+        // post-"done" grace period: only undo/cancel (and yes/no during
+        // cancel confirmation) are handled; all other chat is ignored
+        var grace = loadGrace();
+        if (grace[uid]) {
+            var gl = lower;
+            var g = grace[uid];
+            if (g.confirmCancel || gl === 'undo' || gl === 'cancel') {
+                handleGrace(client, trimmed);
+            }
         }
     });
 
